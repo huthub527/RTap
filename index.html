@@ -17,16 +17,14 @@
 
     h1, h2, h3 { margin: 10px 0; }
 
-    /* HUD */
     #hud {
         padding-top: 35px;
         padding-bottom: 10px;
         position: relative;
         z-index: 10;
     }
-    .hudLine { margin: 4px 0; }
+    .hudLine { margin: 4px 0; font-size: 18px; }
 
-    /* COIN */
     #coin {
         width: 220px;
         height: 220px;
@@ -46,10 +44,10 @@
         z-index: 5;
     }
 
-    /* PANELS */
     .panel {
         margin: 15px auto;
         width: 90%;
+        max-width: 600px;
         padding: 20px;
         background: rgba(0,0,0,0.25);
         border-radius: 18px;
@@ -71,22 +69,32 @@
     input {
         width: 85%;
         max-width: 350px;
-        padding: 12px;
-        margin: 10px auto;
+        padding: 10px;
+        margin: 6px auto;
         border-radius: 10px;
         border: none;
-        font-size: 18px;
+        font-size: 16px;
         text-align: center;
         display: block;
     }
 
-    /* MODAL */
-    #modalOverlay {
+    textarea {
+        width: 85%;
+        max-width: 380px;
+        height: 140px;
+        padding: 10px;
+        margin: 10px auto;
+        border-radius: 10px;
+        border: none;
+        font-size: 14px;
+        resize: vertical;
+        box-sizing: border-box;
+    }
+
+    #modalOverlay, #importOverlay {
         position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
+        top: 0; left: 0;
+        width: 100%; height: 100%;
         background: rgba(0,0,0,0.75);
         display: none;
         justify-content: center;
@@ -96,15 +104,14 @@
         overflow: hidden;
     }
 
-    #modalBox {
+    #modalBox, #importBox {
         width: 88%;
         max-width: 380px;
         background: #1a1a1a;
         padding: 25px;
         border-radius: 16px;
         position: fixed;
-        left: 50%;
-        top: 50%;
+        left: 50%; top: 50%;
         transform: translate(-50%, -50%);
         z-index: 100000;
     }
@@ -113,7 +120,6 @@
 
 <body>
 
-<!-- HUD -->
 <div id="hud">
     <div id="balanceText" class="hudLine">Balance: 0 R</div>
     <div id="tapMessage" class="hudLine">Tap the coin to begin!</div>
@@ -121,10 +127,8 @@
     <div id="userText" class="hudLine">(tap to switch user)</div>
 </div>
 
-<!-- COIN -->
 <div id="coin">R</div>
 
-<!-- PANELS -->
 <div class="panel">
     <h2>Upgrades</h2>
     <button onclick="upgradeTap()">Tap Power +1 (Cost: 20 R)</button>
@@ -146,15 +150,23 @@
 </div>
 
 <div class="panel">
-    <h2>Send R to Another User</h2>
-    <input id="sendUser" placeholder="Recipient Username">
-    <input id="sendAmount" type="number" placeholder="Amount of R">
+    <h2>Shared Wallet</h2>
+    <h3 id="sharedText">Shared Wallet: 0 R</h3>
 
-    <button onclick="sendFromBalance()">Send From Balance</button>
-    <button onclick="sendFromVault()">Send From Vault</button>
+    <button onclick="depositShared10()">Deposit 10 R from Vault → Shared</button>
+    <button onclick="withdrawShared10()">Withdraw 10 R from Shared → Vault</button>
+
+    <input id="sendUserInput" placeholder="Send to user">
+    <input id="sendAmountInput" placeholder="Amount" type="number" min="1">
+    <button onclick="sendFromShared()">Send from Shared → User</button>
 </div>
 
-<!-- MODAL -->
+<div class="panel">
+    <h2>Data Management</h2>
+    <button onclick="exportSave()">Export Save</button>
+    <button onclick="openImportModal()">Import Save</button>
+</div>
+
 <div id="modalOverlay">
     <div id="modalBox">
         <h2>User Login</h2>
@@ -162,363 +174,320 @@
         <input id="pinInput" placeholder="PIN" type="password">
 
         <button onclick="loginUser()">Login</button>
-        <button onclick="createUser()">Create New User</button>
+        <button onclick="createUser()">Create User</button>
         <button style="background:#a00000" onclick="closeModal()">Cancel</button>
     </div>
 </div>
 
-<script>
-/* ---------- DOM SHORTCUTS ---------- */
-const balanceText   = document.getElementById("balanceText");
-const tapMessage    = document.getElementById("tapMessage");
-const comboText     = document.getElementById("comboText");
-const userText      = document.getElementById("userText");
-const vaultText     = document.getElementById("vaultText");
-const tokenText     = document.getElementById("tokenText");
-const sendUserInput = document.getElementById("sendUser");
-const sendAmountInput = document.getElementById("sendAmount");
-const coin          = document.getElementById("coin");
-const modalOverlay  = document.getElementById("modalOverlay");
-const usernameInput = document.getElementById("usernameInput");
-const pinInput      = document.getElementById("pinInput");
+<div id="importOverlay">
+    <div id="importBox">
+        <h2>Import Save</h2>
+        <textarea id="importText" placeholder='{"User":{...}}'></textarea>
+        <button onclick="importSave()">Import</button>
+        <button style="background:#a00000" onclick="closeImportModal()">Cancel</button>
+    </div>
+</div>
 
-/* ---------- USER STORAGE ---------- */
+<script>
+/* -------------------------
+   STORAGE NORMALIZATION
+--------------------------*/
+
 let users = JSON.parse(localStorage.getItem("rtycoon_users") || "{}");
 
-for (let u in users) {
-    users[u].balance      = Number(users[u].balance)      || 0;
-    users[u].vault        = Number(users[u].vault)        || 0;
-    users[u].tokens       = Number(users[u].tokens)       || 0;
-    users[u].tapPower     = Number(users[u].tapPower)     || 1;
-    users[u].cooldownEnd  = Number(users[u].cooldownEnd)  || 0;
-    users[u].receivedLog  = users[u].receivedLog || [];  // array of messages
+function normalizeUser(u) {
+    if (!u) u = {};
+    return {
+        pin: u.pin || "",
+        balance: Number(u.balance) || 0,
+        vault: Number(u.vault) || 0,
+        tokens: Number(u.tokens) || 0,
+        tapMultiplier: Number(u.tapMultiplier) || 1,
+        offlineBoost: Number(u.offlineBoost) || 0,
+        tapPower: Number(u.tapPower) || 1,
+        shared: Number(u.shared) || 0,
+        cooldownEnd: Number(u.cooldownEnd) || 0,
+        lastSessionTaps: Number(u.lastSessionTaps) || 0,
+        receivedLog: Array.isArray(u.receivedLog) ? u.receivedLog : []
+    };
 }
+
+for (const n in users) users[n] = normalizeUser(users[n]);
 
 let currentUser = null;
+function saveUsers() { localStorage.setItem("rtycoon_users", JSON.stringify(users)); }
 
-/* Tap session state */
-let tapSessionActive = false;
-let tapCount = 0;
-let tapSessionEndTime = 0;
-let lastSessionTaps = 0;
+/* -------------------------
+   TIMERS
+--------------------------*/
 
-const tapWindowMs = 10000;          // 10 seconds
-const cooldownMs = 30 * 60 * 1000;  // 30 minutes
+const TAP_WINDOW_MS = 10_000;        // 10 seconds
+const COOLDOWN_MS  = 35 * 60 * 1000; // 35 minutes
 
-function saveUsers() {
-    localStorage.setItem("rtycoon_users", JSON.stringify(users));
-}
+// Session / countdown state
+let tapCountThisSession = 0;
+let tapWindowActive = false;
+let tapWindowEnd = 0;
+let tapCountdownInterval = null;
 
-/* ---------- MODAL CONTROL ---------- */
-function openLogin() {
-    modalOverlay.style.display = "flex";
-}
+/* -------------------------
+   MODALS
+--------------------------*/
 
-function closeModal() {
-    modalOverlay.style.display = "none";
-}
+function openLogin(){ modalOverlay.style.display="flex"; }
+function closeModal(){ modalOverlay.style.display="none"; }
 
-/* ---------- USER CREATION ---------- */
-function createUser() {
+function openImportModal(){ importOverlay.style.display="flex"; }
+function closeImportModal(){ importOverlay.style.display="none"; }
+
+/* -------------------------
+   CREATE / LOGIN
+--------------------------*/
+
+function createUser(){
     const u = usernameInput.value.trim();
     const p = pinInput.value.trim();
-    if (!u || !p) {
-        alert("Enter username and PIN.");
-        return;
-    }
-    if (users[u]) {
-        alert("That user already exists.");
-        return;
-    }
+    if(!u||!p) return alert("Enter username + PIN");
+    if(users[u]) return alert("User already exists!");
 
-    users[u] = {
-        pin: p,
-        balance: 0,
-        vault: 0,
-        tokens: 0,
-        tapPower: 1,
-        cooldownEnd: 0,
-        receivedLog: []
-    };
-
+    users[u] = normalizeUser({pin:p});
     saveUsers();
-    alert("User created! Now log in with that user.");
+    alert("User created!");
 }
 
-/* ---------- LOGIN ---------- */
-function loginUser() {
+function loginUser(){
     const u = usernameInput.value.trim();
     const p = pinInput.value.trim();
-    if (!users[u]) {
-        alert("User not found.");
-        return;
-    }
-    if (users[u].pin !== p) {
-        alert("Wrong PIN.");
-        return;
-    }
+    if(!users[u]) return alert("User not found!");
+    if(users[u].pin!==p) return alert("Wrong PIN!");
 
     currentUser = u;
-    tapSessionActive = false;
-    tapCount = 0;
+    tapWindowActive = false;
+    tapWindowEnd = 0;
+    tapCountThisSession = 0;
+    if (tapCountdownInterval) {
+        clearInterval(tapCountdownInterval);
+        tapCountdownInterval = null;
+    }
     closeModal();
     updateHUD();
-
-    // Show any received notifications
-    const U = users[currentUser];
-    if (U.receivedLog && U.receivedLog.length > 0) {
-        alert(U.receivedLog.join("\n"));
-        U.receivedLog = [];
-        saveUsers();
-    }
 }
 
-/* ---------- SCROLL PRESERVATION ---------- */
-function preserveScroll(fn) {
-    const y = window.scrollY;
-    fn();
-    window.scrollTo(0, y);
-}
+/* -------------------------
+   TAP WINDOW + COIN LOGIC
+--------------------------*/
 
-/* ---------- TAP → R CONVERSION ---------- */
-function tapsToR(taps) {
-    // Non-1:1 conversion so 98 taps ≈ 4–6 R.
-    function randInt(min, max) {
-        return Math.floor(Math.random() * (max - min + 1)) + min;
-    }
-
-    if (taps < 20)        return randInt(0, 1);
-    else if (taps < 40)   return randInt(1, 3);
-    else if (taps < 70)   return randInt(3, 5);
-    else if (taps < 100)  return randInt(4, 6);   // 98 taps falls here
-    else if (taps < 150)  return randInt(5, 8);
-    else                  return randInt(8, 10);
-}
-
-/* ---------- COIN TAP LOGIC ---------- */
-coin.addEventListener("click", () => {
-    if (!currentUser) {
-        openLogin();
-        return;
-    }
+document.getElementById("coin").addEventListener("click", () => {
+    if (!currentUser) return openLogin();
 
     const U = users[currentUser];
     const now = Date.now();
 
-    // Check cooldown
+    // --- COOLDOWN CHECK ---
     if (now < U.cooldownEnd) {
-        const remainingMin = Math.ceil((U.cooldownEnd - now) / 60000);
-        tapMessage.textContent = `Cooldown: ${remainingMin} min left`;
+        const remain = U.cooldownEnd - now;
+        const m = Math.floor(remain / 60000);
+        const s = Math.floor((remain % 60000) / 1000);
+        tapMessage.textContent = `Cooldown: ${m}m ${s}s`;
         return;
     }
 
-    // Start new session if not active
-    if (!tapSessionActive) {
-        tapSessionActive = true;
-        tapCount = 0;
-        tapSessionEndTime = now + tapWindowMs;
-        tapMessage.textContent = "TAP TAP TAP!";
+    // --- START 10s TAP WINDOW IF NOT ACTIVE ---
+    if (!tapWindowActive) {
+        tapWindowActive = true;
+        tapWindowEnd = now + TAP_WINDOW_MS;
+        tapCountThisSession = 0;
+        startTapWindowCountdown();
     }
 
-    // If time is up, finish the session
-    if (now >= tapSessionEndTime) {
-        finishTapSession();
-        return;
-    }
-
-    // Count the tap
-    tapCount++;
-    comboText.textContent = `Session taps: ${tapCount}`;
-});
-
-function finishTapSession() {
-    if (!currentUser) return;
-
-    tapSessionActive = false;
-    lastSessionTaps = tapCount;
-
-    const U = users[currentUser];
-    const earnedR = tapsToR(tapCount) * U.tapPower;
-
-    U.balance += earnedR;
-    U.cooldownEnd = Date.now() + cooldownMs;
+    // --- APPLY TAP DURING WINDOW ---
+    tapCountThisSession++;
+    U.balance += U.tapPower * U.tapMultiplier;
 
     saveUsers();
     updateHUD();
+});
 
-    tapMessage.textContent = `You earned ${earnedR} R from ${tapCount} taps. Cooldown started.`;
-    comboText.textContent = `Last session taps: ${lastSessionTaps}`;
-}
+function startTapWindowCountdown() {
+    if (tapCountdownInterval) clearInterval(tapCountdownInterval);
 
-/* ---------- UPGRADE SYSTEM ---------- */
-function upgradeTap() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
+    tapCountdownInterval = setInterval(() => {
+        if (!currentUser) {
+            clearInterval(tapCountdownInterval);
+            tapCountdownInterval = null;
+            tapWindowActive = false;
+            return;
+            }
+
         const U = users[currentUser];
-        const cost = 20;
-        if (U.balance >= cost) {
-            U.balance -= cost;
-            U.tapPower += 1;
+        const now = Date.now();
+        const remaining = tapWindowEnd - now;
+
+        if (remaining <= 0) {
+            // end of 10-second window
+            clearInterval(tapCountdownInterval);
+            tapCountdownInterval = null;
+            tapWindowActive = false;
+
+            U.cooldownEnd = Date.now() + COOLDOWN_MS;
+            U.lastSessionTaps = tapCountThisSession;
+            tapCountThisSession = 0;
+
             saveUsers();
             updateHUD();
-        } else {
-            alert("Not enough R to upgrade Tap Power.");
-        }
-    });
-}
-
-function upgradeOffline() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const U = users[currentUser];
-        const cost = 75;
-        if (U.balance >= cost) {
-            U.balance -= cost;
-            U.offlineBoost = (U.offlineBoost || 0) + 1;
-            saveUsers();
-            updateHUD();
-            alert("Offline Boost purchased! (placeholder effect)");
-        } else {
-            alert("Not enough R for Offline Boost.");
-        }
-    });
-}
-
-/* ---------- VAULT CONTROLS ---------- */
-function deposit10() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const U = users[currentUser];
-        if (U.balance >= 10) {
-            U.balance -= 10;
-            U.vault += 10;
-            saveUsers();
-            updateHUD();
-        }
-    });
-}
-
-function depositAll() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const U = users[currentUser];
-        U.vault += U.balance;
-        U.balance = 0;
-        saveUsers();
-        updateHUD();
-    });
-}
-
-function withdraw10() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const U = users[currentUser];
-        if (U.vault >= 10) {
-            U.vault -= 10;
-            U.tokens += 10;
-            saveUsers();
-            updateHUD();
-        }
-    });
-}
-
-function withdrawAll() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const U = users[currentUser];
-        U.tokens += U.vault;
-        U.vault = 0;
-        saveUsers();
-        updateHUD();
-    });
-}
-
-/* ---------- P2P TRANSFER SYSTEM ---------- */
-function sendFromBalance() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const senderName = currentUser;
-        const receiverName = sendUserInput.value.trim();
-        const amount = Number(sendAmountInput.value.trim());
-
-        if (!receiverName || !users[receiverName]) {
-            alert("Recipient user not found.");
-            return;
-        }
-        if (receiverName === senderName) {
-            alert("You cannot send R to yourself.");
-            return;
-        }
-        if (!amount || amount <= 0) {
-            alert("Enter a valid amount.");
             return;
         }
 
-        const sender = users[senderName];
-        const receiver = users[receiverName];
-
-        if (sender.balance < amount) {
-            alert("Not enough R in balance.");
-            return;
-        }
-
-        sender.balance -= amount;
-        receiver.balance += amount;
-
-        // Add notification to receiver
-        receiver.receivedLog = receiver.receivedLog || [];
-        receiver.receivedLog.push(`You received ${amount} R from ${senderName}.`);
-
-        saveUsers();
-        updateHUD();
-        alert(`Sent ${amount} R from BALANCE to ${receiverName}.`);
-    });
+        const seconds = Math.ceil(remaining / 1000);
+        tapMessage.textContent = `Tap window: ${seconds}s left!`;
+    }, 200);
 }
 
-function sendFromVault() {
-    if (!currentUser) return openLogin();
-    preserveScroll(() => {
-        const senderName = currentUser;
-        const receiverName = sendUserInput.value.trim();
-        const amount = Number(sendAmountInput.value.trim());
+/* -------------------------
+   UPGRADES
+--------------------------*/
 
-        if (!receiverName || !users[receiverName]) {
-            alert("Recipient user not found.");
-            return;
-        }
-        if (receiverName === senderName) {
-            alert("You cannot send R to yourself.");
-            return;
-        }
-        if (!amount || amount <= 0) {
-            alert("Enter a valid amount.");
-            return;
-        }
+function upgradeTap(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
 
-        const sender = users[senderName];
-        const receiver = users[receiverName];
-
-        if (sender.vault < amount) {
-            alert("Not enough R in vault.");
-            return;
-        }
-
-        sender.vault -= amount;
-        receiver.balance += amount;
-
-        // Add notification to receiver
-        receiver.receivedLog = receiver.receivedLog || [];
-        receiver.receivedLog.push(`You received ${amount} R from ${senderName} (from their Vault).`);
-
-        saveUsers();
-        updateHUD();
-        alert(`Sent ${amount} R from VAULT to ${receiverName}.`);
-    });
+    if(U.balance < 20) return alert("Not enough R!");
+    U.balance -= 20;
+    U.tapPower += 1;
+    saveUsers();
+    updateHUD();
 }
 
-/* ---------- HUD UPDATE ---------- */
-function updateHUD() {
-    if (!currentUser) return;
+function upgradeOffline(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+
+    if(U.balance < 75) return alert("Not enough R!");
+    U.balance -= 75;
+    U.offlineBoost += 1;
+    saveUsers();
+    updateHUD();
+}
+
+/* -------------------------
+   VAULT + TOKENS
+--------------------------*/
+
+function deposit10(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+    if(U.balance>=10){ U.balance-=10; U.vault+=10; saveUsers(); updateHUD(); }
+}
+
+function depositAll(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+    U.vault+=U.balance;
+    U.balance=0;
+    saveUsers(); updateHUD();
+}
+
+function withdraw10(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+    if(U.vault>=10){ U.vault-=10; U.tokens+=10; saveUsers(); updateHUD(); }
+}
+
+function withdrawAll(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+    U.tokens+=U.vault;
+    U.vault=0;
+    saveUsers(); updateHUD();
+}
+
+/* -------------------------
+   SHARED WALLET
+--------------------------*/
+
+function depositShared10(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+    if(U.vault>=10){ U.vault-=10; U.shared+=10; saveUsers(); updateHUD(); }
+}
+
+function withdrawShared10(){
+    if(!currentUser) return openLogin();
+    const U = users[currentUser];
+    if(U.shared>=10){ U.shared-=10; U.vault+=10; saveUsers(); updateHUD(); }
+}
+
+function sendFromShared(){
+    if(!currentUser) return openLogin();
+
+    const sender = users[currentUser];
+    const receiverName = sendUserInput.value.trim();
+    const amount = Number(sendAmountInput.value.trim());
+
+    if(!receiverName || !users[receiverName]) return alert("User not found");
+    if(receiverName===currentUser) return alert("Can't send to yourself");
+    if(amount<=0) return alert("Invalid amount");
+    if(sender.shared < amount) return alert("Not enough in shared");
+
+    sender.shared -= amount;
+    users[receiverName].balance += amount;
+    users[receiverName].receivedLog.push(
+        `Received ${amount} R from ${currentUser}`
+    );
+
+    saveUsers();
+    updateHUD();
+}
+
+/* -------------------------
+   EXPORT / IMPORT SAVE
+--------------------------*/
+
+function exportSave(){
+    const raw = localStorage.getItem("rtycoon_users");
+    if(!raw) return alert("No save found.");
+
+    let formatted = raw;
+    try{ formatted = JSON.stringify(JSON.parse(raw),null,2); }catch(e){}
+
+    if(navigator.clipboard){
+        navigator.clipboard.writeText(formatted).then(()=>{
+            alert("Copied to clipboard:\n\n"+formatted);
+        },()=>{
+            alert("Save data:\n\n"+formatted);
+        });
+    } else {
+        alert("Save data:\n\n"+formatted);
+    }
+}
+
+function importSave(){
+    const text = importText.value.trim();
+    if(!text) return alert("Paste your JSON first.");
+
+    let obj;
+    try{ obj = JSON.parse(text); }catch(e){ return alert("Invalid JSON"); }
+
+    const newUsers = {};
+    for(const n in obj){
+        newUsers[n] = normalizeUser(obj[n]);
+    }
+
+    users = newUsers;
+    saveUsers();
+    currentUser = null;
+
+    closeImportModal();
+    alert("Save imported! Log in again.");
+    openLogin();
+}
+
+/* -------------------------
+   HUD UPDATE
+--------------------------*/
+
+function updateHUD(){
+    if(!currentUser) return;
 
     const U = users[currentUser];
     const now = Date.now();
@@ -526,27 +495,32 @@ function updateHUD() {
     balanceText.textContent = `Balance (${currentUser}): ${U.balance} R`;
     vaultText.textContent   = `Vault: ${U.vault} R`;
     tokenText.textContent   = `Tokens: ${U.tokens} T`;
-    comboText.textContent   = `Last session taps: ${lastSessionTaps}`;
+    sharedText.textContent  = `Shared Wallet: ${U.shared} R`;
+    comboText.textContent   = `Last session taps: ${U.lastSessionTaps}`;
 
-    if (now < U.cooldownEnd) {
-        const remainingMin = Math.ceil((U.cooldownEnd - now) / 60000);
-        tapMessage.textContent = `Cooldown: ${remainingMin} min left`;
-    } else if (tapSessionActive) {
-        tapMessage.textContent = "Tapping session in progress!";
+    if(now < U.cooldownEnd){
+        const remain = U.cooldownEnd-now;
+        const m=Math.floor(remain/60000);
+        const s=Math.floor((remain%60000)/1000);
+        tapMessage.textContent=`Cooldown: ${m}m ${s}s`;
+    } else if (tapWindowActive) {
+        // message is controlled by the countdown, don't overwrite it
     } else {
-        tapMessage.textContent = "Tap the coin to begin!";
+        tapMessage.textContent="Tap the coin to begin!";
     }
 
-    userText.textContent = `User: ${currentUser} (tap to switch)`;
+    userText.textContent = `User: ${currentUser} (tap to switch user)`;
 }
 
-/* Switch user on HUD tap */
-userText.addEventListener("click", () => {
-    openLogin();
-});
+/* -------------------------
+   ON LOAD
+--------------------------*/
 
-/* Auto-open login on load */
-window.onload = () => {
+window.onload = ()=>{
+    if(!Object.keys(users).length){
+        users["Guest"] = normalizeUser({pin:"0000"});
+        saveUsers();
+    }
     openLogin();
 };
 </script>
