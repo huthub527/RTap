@@ -198,7 +198,7 @@
 
 <script>
 /* ------------------------------
-   NORMALIZE USERS (TapPower removed)
+   NORMALIZE USERS
 --------------------------------*/
 let users = JSON.parse(localStorage.getItem("rtycoon_users") || "{}");
 
@@ -210,8 +210,7 @@ function normalizeUser(u) {
         vault: Number(u.vault) || 0,
         tokens: Number(u.tokens) || 0,
 
-        // tapPower removed — always 1 R per tap
-        tapMultiplier: 1,
+        tapMultiplier: 1, // Always 1 tap = 1 R
 
         offlineBoost: Number(u.offlineBoost) || 0,
         shared: Number(u.shared) || 0,
@@ -219,7 +218,6 @@ function normalizeUser(u) {
         lastSessionTaps: Number(u.lastSessionTaps) || 0,
         receivedLog: Array.isArray(u.receivedLog) ? u.receivedLog : [],
 
-        // Daily challenge
         dailyCompleted: !!u.dailyCompleted,
         nextDailyTime: Number(u.nextDailyTime) || 0
     };
@@ -228,21 +226,21 @@ function normalizeUser(u) {
 for (const n in users) users[n] = normalizeUser(users[n]);
 
 let currentUser = null;
-function saveUsers() {
-    localStorage.setItem("rtycoon_users", JSON.stringify(users));
-}
+function saveUsers() { localStorage.setItem("rtycoon_users", JSON.stringify(users)); }
+
 /* -------------------------
-      TIMERS
+      COOLDOWN TIMERS
 --------------------------*/
 
-const TAP_WINDOW_MS = 10_000;        // 10 seconds tapping
-const COOLDOWN_MS  = 35 * 60 * 1000; // 35 minutes
+const TAP_WINDOW_MS = 10_000;
+const COOLDOWN_MS = 35 * 60 * 1000;
 
 let tapSessionStart = 0;
 let tapCountThisSession = 0;
+let tapWindowTimer = null;
 
 /* -------------------------
-       MODALS
+      MODALS
 --------------------------*/
 
 function openLogin(){ modalOverlay.style.display="flex"; }
@@ -283,49 +281,68 @@ function loginUser(){
 }
 
 /* -------------------------
-        GAME LOGIC
+   GAME LOGIC — FULL FIX
 --------------------------*/
 
-document.getElementById("coin").addEventListener("click",()=>{
+document.getElementById("coin").addEventListener("click", () => {
+    if (!currentUser) return openLogin();
 
-    if(!currentUser) return openLogin();
     const U = users[currentUser];
     const now = Date.now();
 
-    // COOL DOWN
-    if(now < U.cooldownEnd){
-        const remain = U.cooldownEnd-now;
-        const m = Math.floor(remain/60000);
-        const s = Math.floor((remain%60000)/1000);
-        tapMessage.textContent=`Cooldown: ${m}m ${s}s`;
+    // COOL DOWN CHECK
+    if (now < U.cooldownEnd) {
+        const remain = U.cooldownEnd - now;
+        const m = Math.floor(remain / 60000);
+        const s = Math.floor((remain % 60000) / 1000);
+        tapMessage.textContent = `Cooldown: ${m}m ${s}s`;
         return;
     }
 
-    // START OR RESTART TAP SESSION
-    if(!tapSessionStart || now - tapSessionStart > TAP_WINDOW_MS){
+    // START NEW TAP SESSION
+    if (!tapSessionStart) {
         tapSessionStart = now;
         tapCountThisSession = 0;
+
+        // Force session to end after 10 seconds
+        clearTimeout(tapWindowTimer);
+        tapWindowTimer = setTimeout(() => endTapSession(), TAP_WINDOW_MS);
     }
 
+    // GIVE R
     tapCountThisSession++;
-
-    // tapPower removed — always 1 R per tap
     U.balance += 1;
-
-    // TAP WINDOW ENDED?
-    if(now - tapSessionStart >= TAP_WINDOW_MS){
-        U.cooldownEnd = now + COOLDOWN_MS;
-        U.lastSessionTaps = tapCountThisSession;
-        tapSessionStart = 0;
-        tapCountThisSession = 0;
-    }
 
     saveUsers();
     updateHUD();
 });
 
 /* -------------------------
-       DAILY MATH
+     FORCED SESSION END
+--------------------------*/
+
+function endTapSession() {
+    if (!currentUser) return;
+
+    const U = users[currentUser];
+    const now = Date.now();
+
+    if (!tapSessionStart) return;
+
+    U.lastSessionTaps = tapCountThisSession;
+
+    // Start cooldown
+    U.cooldownEnd = now + COOLDOWN_MS;
+
+    tapSessionStart = 0;
+    tapCountThisSession = 0;
+
+    saveUsers();
+    updateHUD();
+}
+
+/* -------------------------
+      DAILY MATH SYSTEM
 --------------------------*/
 
 let dailyCorrectAnswer = null;
@@ -336,15 +353,12 @@ function maybeTriggerDaily(){
     const U = users[currentUser];
     const now = Date.now();
 
-    // Already completed today?
     if(now < U.nextDailyTime) return;
 
-    // Random chance ~ once per day:
-    // 1 check every 30 seconds from 8am–10pm.
     const hour = new Date().getHours();
     if(hour < 8 || hour > 22) return;
 
-    if(Math.random() < 0.0025){ // Roughly once per day
+    if(Math.random() < 0.0025){
         startDailyChallenge();
     }
 }
@@ -352,7 +366,6 @@ function maybeTriggerDaily(){
 function startDailyChallenge(){
     const U = users[currentUser];
 
-    // Generate equation
     let a = Math.floor(Math.random()*30)+1;
     let b = Math.floor(Math.random()*30)+1;
     dailyCorrectAnswer = a + b;
@@ -361,7 +374,6 @@ function startDailyChallenge(){
     dailyAnswer.value = "";
     openDailyModal();
 
-    // Mark next available tomorrow
     const tomorrow = new Date();
     tomorrow.setHours(24,0,0,0);
     U.nextDailyTime = tomorrow.getTime();
@@ -383,7 +395,7 @@ function submitDaily(){
 }
 
 /* -------------------------
-     VAULT + TOKENS
+ VAULT + TOKEN SYSTEM
 --------------------------*/
 
 function deposit10(){
@@ -415,7 +427,7 @@ function withdrawAll(){
 }
 
 /* -------------------------
-      SHARED WALLET
+     SHARED WALLET SYSTEM
 --------------------------*/
 
 function depositShared10(){
@@ -496,7 +508,7 @@ function importSave(){
 }
 
 /* -------------------------
-       HUD UPDATE
+      HUD UPDATE
 --------------------------*/
 
 function updateHUD(){
