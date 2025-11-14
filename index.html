@@ -23,6 +23,7 @@
         position: relative;
         z-index: 10;
     }
+
     .hudLine { margin: 4px 0; font-size: 18px; }
 
     #coin {
@@ -91,7 +92,7 @@
         box-sizing: border-box;
     }
 
-    #modalOverlay, #importOverlay {
+    #modalOverlay, #importOverlay, #dailyOverlay {
         position: fixed;
         top: 0; left: 0;
         width: 100%; height: 100%;
@@ -104,7 +105,7 @@
         overflow: hidden;
     }
 
-    #modalBox, #importBox {
+    #modalBox, #importBox, #dailyBox {
         width: 88%;
         max-width: 380px;
         background: #1a1a1a;
@@ -128,12 +129,6 @@
 </div>
 
 <div id="coin">R</div>
-
-<div class="panel">
-    <h2>Upgrades</h2>
-    <button onclick="upgradeTap()">Tap Power +1 (Cost: 20 R)</button>
-    <button onclick="upgradeOffline()">Offline Boost (Cost: 75 R)</button>
-</div>
 
 <div class="panel">
     <h2>Vault</h2>
@@ -167,6 +162,7 @@
     <button onclick="openImportModal()">Import Save</button>
 </div>
 
+<!-- Login Modal -->
 <div id="modalOverlay">
     <div id="modalBox">
         <h2>User Login</h2>
@@ -179,6 +175,7 @@
     </div>
 </div>
 
+<!-- Import Modal -->
 <div id="importOverlay">
     <div id="importBox">
         <h2>Import Save</h2>
@@ -188,11 +185,21 @@
     </div>
 </div>
 
-<script>
-/* -------------------------
-   STORAGE NORMALIZATION
---------------------------*/
+<!-- Daily Math Challenge -->
+<div id="dailyOverlay">
+    <div id="dailyBox">
+        <h2>Daily Math Challenge</h2>
+        <p id="dailyQuestion">Loading…</p>
+        <input id="dailyAnswer" type="number" placeholder="Your answer">
+        <button onclick="submitDaily()">Submit</button>
+        <button style="background:#a00000" onclick="closeDailyModal()">Close</button>
+    </div>
+</div>
 
+<script>
+/* ------------------------------
+   NORMALIZE USERS (TapPower removed)
+--------------------------------*/
 let users = JSON.parse(localStorage.getItem("rtycoon_users") || "{}");
 
 function normalizeUser(u) {
@@ -202,36 +209,40 @@ function normalizeUser(u) {
         balance: Number(u.balance) || 0,
         vault: Number(u.vault) || 0,
         tokens: Number(u.tokens) || 0,
-        tapMultiplier: Number(u.tapMultiplier) || 1,
+
+        // tapPower removed — always 1 R per tap
+        tapMultiplier: 1,
+
         offlineBoost: Number(u.offlineBoost) || 0,
-        tapPower: Number(u.tapPower) || 1,
         shared: Number(u.shared) || 0,
         cooldownEnd: Number(u.cooldownEnd) || 0,
         lastSessionTaps: Number(u.lastSessionTaps) || 0,
-        receivedLog: Array.isArray(u.receivedLog) ? u.receivedLog : []
+        receivedLog: Array.isArray(u.receivedLog) ? u.receivedLog : [],
+
+        // Daily challenge
+        dailyCompleted: !!u.dailyCompleted,
+        nextDailyTime: Number(u.nextDailyTime) || 0
     };
 }
 
 for (const n in users) users[n] = normalizeUser(users[n]);
 
 let currentUser = null;
-function saveUsers() { localStorage.setItem("rtycoon_users", JSON.stringify(users)); }
-
+function saveUsers() {
+    localStorage.setItem("rtycoon_users", JSON.stringify(users));
+}
 /* -------------------------
-   TIMERS
+      TIMERS
 --------------------------*/
 
-const TAP_WINDOW_MS = 10_000;        // 10 seconds
+const TAP_WINDOW_MS = 10_000;        // 10 seconds tapping
 const COOLDOWN_MS  = 35 * 60 * 1000; // 35 minutes
 
-// Session / countdown state
+let tapSessionStart = 0;
 let tapCountThisSession = 0;
-let tapWindowActive = false;
-let tapWindowEnd = 0;
-let tapCountdownInterval = null;
 
 /* -------------------------
-   MODALS
+       MODALS
 --------------------------*/
 
 function openLogin(){ modalOverlay.style.display="flex"; }
@@ -240,8 +251,11 @@ function closeModal(){ modalOverlay.style.display="none"; }
 function openImportModal(){ importOverlay.style.display="flex"; }
 function closeImportModal(){ importOverlay.style.display="none"; }
 
+function openDailyModal(){ dailyOverlay.style.display="flex"; }
+function closeDailyModal(){ dailyOverlay.style.display="none"; }
+
 /* -------------------------
-   CREATE / LOGIN
+     CREATE / LOGIN
 --------------------------*/
 
 function createUser(){
@@ -262,115 +276,114 @@ function loginUser(){
     if(users[u].pin!==p) return alert("Wrong PIN!");
 
     currentUser = u;
-    tapWindowActive = false;
-    tapWindowEnd = 0;
+    tapSessionStart = 0;
     tapCountThisSession = 0;
-    if (tapCountdownInterval) {
-        clearInterval(tapCountdownInterval);
-        tapCountdownInterval = null;
-    }
     closeModal();
     updateHUD();
 }
 
 /* -------------------------
-   TAP WINDOW + COIN LOGIC
+        GAME LOGIC
 --------------------------*/
 
-document.getElementById("coin").addEventListener("click", () => {
-    if (!currentUser) return openLogin();
+document.getElementById("coin").addEventListener("click",()=>{
 
+    if(!currentUser) return openLogin();
     const U = users[currentUser];
     const now = Date.now();
 
-    // --- COOLDOWN CHECK ---
-    if (now < U.cooldownEnd) {
-        const remain = U.cooldownEnd - now;
-        const m = Math.floor(remain / 60000);
-        const s = Math.floor((remain % 60000) / 1000);
-        tapMessage.textContent = `Cooldown: ${m}m ${s}s`;
+    // COOL DOWN
+    if(now < U.cooldownEnd){
+        const remain = U.cooldownEnd-now;
+        const m = Math.floor(remain/60000);
+        const s = Math.floor((remain%60000)/1000);
+        tapMessage.textContent=`Cooldown: ${m}m ${s}s`;
         return;
     }
 
-    // --- START 10s TAP WINDOW IF NOT ACTIVE ---
-    if (!tapWindowActive) {
-        tapWindowActive = true;
-        tapWindowEnd = now + TAP_WINDOW_MS;
+    // START OR RESTART TAP SESSION
+    if(!tapSessionStart || now - tapSessionStart > TAP_WINDOW_MS){
+        tapSessionStart = now;
         tapCountThisSession = 0;
-        startTapWindowCountdown();
     }
 
-    // --- APPLY TAP DURING WINDOW ---
     tapCountThisSession++;
-    U.balance += U.tapPower * U.tapMultiplier;
+
+    // tapPower removed — always 1 R per tap
+    U.balance += 1;
+
+    // TAP WINDOW ENDED?
+    if(now - tapSessionStart >= TAP_WINDOW_MS){
+        U.cooldownEnd = now + COOLDOWN_MS;
+        U.lastSessionTaps = tapCountThisSession;
+        tapSessionStart = 0;
+        tapCountThisSession = 0;
+    }
 
     saveUsers();
     updateHUD();
 });
 
-function startTapWindowCountdown() {
-    if (tapCountdownInterval) clearInterval(tapCountdownInterval);
-
-    tapCountdownInterval = setInterval(() => {
-        if (!currentUser) {
-            clearInterval(tapCountdownInterval);
-            tapCountdownInterval = null;
-            tapWindowActive = false;
-            return;
-            }
-
-        const U = users[currentUser];
-        const now = Date.now();
-        const remaining = tapWindowEnd - now;
-
-        if (remaining <= 0) {
-            // end of 10-second window
-            clearInterval(tapCountdownInterval);
-            tapCountdownInterval = null;
-            tapWindowActive = false;
-
-            U.cooldownEnd = Date.now() + COOLDOWN_MS;
-            U.lastSessionTaps = tapCountThisSession;
-            tapCountThisSession = 0;
-
-            saveUsers();
-            updateHUD();
-            return;
-        }
-
-        const seconds = Math.ceil(remaining / 1000);
-        tapMessage.textContent = `Tap window: ${seconds}s left!`;
-    }, 200);
-}
-
 /* -------------------------
-   UPGRADES
+       DAILY MATH
 --------------------------*/
 
-function upgradeTap(){
-    if(!currentUser) return openLogin();
-    const U = users[currentUser];
+let dailyCorrectAnswer = null;
 
-    if(U.balance < 20) return alert("Not enough R!");
-    U.balance -= 20;
-    U.tapPower += 1;
-    saveUsers();
-    updateHUD();
+function maybeTriggerDaily(){
+    if(!currentUser) return;
+
+    const U = users[currentUser];
+    const now = Date.now();
+
+    // Already completed today?
+    if(now < U.nextDailyTime) return;
+
+    // Random chance ~ once per day:
+    // 1 check every 30 seconds from 8am–10pm.
+    const hour = new Date().getHours();
+    if(hour < 8 || hour > 22) return;
+
+    if(Math.random() < 0.0025){ // Roughly once per day
+        startDailyChallenge();
+    }
 }
 
-function upgradeOffline(){
-    if(!currentUser) return openLogin();
+function startDailyChallenge(){
     const U = users[currentUser];
 
-    if(U.balance < 75) return alert("Not enough R!");
-    U.balance -= 75;
-    U.offlineBoost += 1;
+    // Generate equation
+    let a = Math.floor(Math.random()*30)+1;
+    let b = Math.floor(Math.random()*30)+1;
+    dailyCorrectAnswer = a + b;
+
+    dailyQuestion.textContent = `${a} + ${b} = ?`;
+    dailyAnswer.value = "";
+    openDailyModal();
+
+    // Mark next available tomorrow
+    const tomorrow = new Date();
+    tomorrow.setHours(24,0,0,0);
+    U.nextDailyTime = tomorrow.getTime();
     saveUsers();
-    updateHUD();
+}
+
+function submitDaily(){
+    const ans = Number(dailyAnswer.value.trim());
+    if(ans === dailyCorrectAnswer){
+        const U = users[currentUser];
+        U.balance += 300;
+        saveUsers();
+        alert("Correct! +300 R");
+        closeDailyModal();
+        updateHUD();
+    } else {
+        alert("Incorrect.");
+    }
 }
 
 /* -------------------------
-   VAULT + TOKENS
+     VAULT + TOKENS
 --------------------------*/
 
 function deposit10(){
@@ -402,7 +415,7 @@ function withdrawAll(){
 }
 
 /* -------------------------
-   SHARED WALLET
+      SHARED WALLET
 --------------------------*/
 
 function depositShared10(){
@@ -425,9 +438,9 @@ function sendFromShared(){
     const amount = Number(sendAmountInput.value.trim());
 
     if(!receiverName || !users[receiverName]) return alert("User not found");
-    if(receiverName===currentUser) return alert("Can't send to yourself");
+    if(receiverName===currentUser) return alert("Cannot send to yourself");
     if(amount<=0) return alert("Invalid amount");
-    if(sender.shared < amount) return alert("Not enough in shared");
+    if(sender.shared < amount) return alert("Insufficient shared funds");
 
     sender.shared -= amount;
     users[receiverName].balance += amount;
@@ -454,16 +467,16 @@ function exportSave(){
         navigator.clipboard.writeText(formatted).then(()=>{
             alert("Copied to clipboard:\n\n"+formatted);
         },()=>{
-            alert("Save data:\n\n"+formatted);
+            alert("Save:\n\n"+formatted);
         });
     } else {
-        alert("Save data:\n\n"+formatted);
+        alert("Save:\n\n"+formatted);
     }
 }
 
 function importSave(){
     const text = importText.value.trim();
-    if(!text) return alert("Paste your JSON first.");
+    if(!text) return alert("Paste your save JSON first.");
 
     let obj;
     try{ obj = JSON.parse(text); }catch(e){ return alert("Invalid JSON"); }
@@ -483,7 +496,7 @@ function importSave(){
 }
 
 /* -------------------------
-   HUD UPDATE
+       HUD UPDATE
 --------------------------*/
 
 function updateHUD(){
@@ -503,8 +516,6 @@ function updateHUD(){
         const m=Math.floor(remain/60000);
         const s=Math.floor((remain%60000)/1000);
         tapMessage.textContent=`Cooldown: ${m}m ${s}s`;
-    } else if (tapWindowActive) {
-        // message is controlled by the countdown, don't overwrite it
     } else {
         tapMessage.textContent="Tap the coin to begin!";
     }
@@ -513,7 +524,7 @@ function updateHUD(){
 }
 
 /* -------------------------
-   ON LOAD
+      ON LOAD
 --------------------------*/
 
 window.onload = ()=>{
@@ -521,7 +532,11 @@ window.onload = ()=>{
         users["Guest"] = normalizeUser({pin:"0000"});
         saveUsers();
     }
+
     openLogin();
+
+    // Daily check every 30 sec
+    setInterval(maybeTriggerDaily, 30_000);
 };
 </script>
 
