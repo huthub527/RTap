@@ -158,8 +158,8 @@
 
 <div class="panel">
     <h2>Data Management</h2>
-    <button onclick="exportSave()">Export Save</button>
-    <button onclick="openImportModal()">Import Save</button>
+    <button onclick="exportSave()">Export Save (local backup)</button>
+    <button onclick="openImportModal()">Import Save (local backup)</button>
 </div>
 
 <!-- Login Modal -->
@@ -196,10 +196,27 @@
     </div>
 </div>
 
+<!-- Supabase CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
 <script>
-/* ------------------------------
-   NORMALIZE USERS
---------------------------------*/
+/* ============================================================
+   CONFIG — Supabase
+   ============================================================ */
+
+const SUPABASE_URL = "https://ucbdicziipbdgwibmhjf.supabase.co";
+const SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVjYmRpY3ppaXBiZGd3aWJtaGpmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMxMDIwMjEsImV4cCI6MjA3ODY3ODAyMX0.BIj0rddCc9sK8jGlDaf0RPvMIZMCDVezAJdNXH9KkvY";
+
+const supabaseClient = window.supabase.createClient(
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY
+);
+
+/* ============================================================
+   LOCAL BACKUP STRUCTURE
+   ============================================================ */
+
 let users = JSON.parse(localStorage.getItem("rtycoon_users") || "{}");
 
 function normalizeUser(u) {
@@ -209,39 +226,45 @@ function normalizeUser(u) {
         balance: Number(u.balance) || 0,
         vault: Number(u.vault) || 0,
         tokens: Number(u.tokens) || 0,
-
-        tapMultiplier: 1, // Always 1 tap = 1 R
-
-        offlineBoost: Number(u.offlineBoost) || 0,
         shared: Number(u.shared) || 0,
+
+        // tapMultiplier fixed at 1 (no pay-to-win)
+        tapMultiplier: 1,
+
         cooldownEnd: Number(u.cooldownEnd) || 0,
         lastSessionTaps: Number(u.lastSessionTaps) || 0,
-        receivedLog: Array.isArray(u.receivedLog) ? u.receivedLog : [],
-
-        dailyCompleted: !!u.dailyCompleted,
-        nextDailyTime: Number(u.nextDailyTime) || 0
+        offlineBoost: Number(u.offlineBoost) || 0,
+        nextDailyTime: Number(u.nextDailyTime) || 0,
+        receivedLog: Array.isArray(u.receivedLog) ? u.receivedLog : []
     };
 }
 
+// normalize everything from storage
 for (const n in users) users[n] = normalizeUser(users[n]);
 
+function saveLocalUsers() {
+    localStorage.setItem("rtycoon_users", JSON.stringify(users));
+}
+
+/* ============================================================
+   TAP / COOLDOWN CONSTANTS
+   ============================================================ */
+
+const TAP_WINDOW_MS = 10_000;              // 10 seconds
+const COOLDOWN_MS  = 35 * 60 * 1000;       // 35 minutes
+
 let currentUser = null;
-function saveUsers() { localStorage.setItem("rtycoon_users", JSON.stringify(users)); }
-
-/* -------------------------
-      COOLDOWN TIMERS
---------------------------*/
-
-const TAP_WINDOW_MS = 10_000;
-const COOLDOWN_MS = 35 * 60 * 1000;
+let currentUserId = null; // Supabase row id (uuid)
 
 let tapSessionStart = 0;
 let tapCountThisSession = 0;
 let tapWindowTimer = null;
 
-/* -------------------------
-      MODALS
---------------------------*/
+let dailyCorrectAnswer = null;
+
+/* ============================================================
+   MODALS
+   ============================================================ */
 
 function openLogin(){ modalOverlay.style.display="flex"; }
 function closeModal(){ modalOverlay.style.display="none"; }
@@ -252,37 +275,194 @@ function closeImportModal(){ importOverlay.style.display="none"; }
 function openDailyModal(){ dailyOverlay.style.display="flex"; }
 function closeDailyModal(){ dailyOverlay.style.display="none"; }
 
-/* -------------------------
-     CREATE / LOGIN
---------------------------*/
+/* ============================================================
+   HELPERS: Supabase <-> Local mapping
+   ============================================================ */
 
-function createUser(){
+function rowToUser(row) {
+    // converts a Supabase row into our local user object
+    return normalizeUser({
+        pin: row.pin,
+        balance: row.balance,
+        vault: row.vault,
+        tokens: row.tokens,
+        shared: row.shared,
+        cooldownEnd: row.cooldown_end,
+        lastSessionTaps: row.last_session_taps,
+        nextDailyTime: row.next_daily_time,
+        offlineBoost: row.offline_boost,
+        receivedLog: row.received_log || []
+    });
+}
+
+function userToRow(username, user) {
+    return {
+        username,
+        pin: user.pin,
+        balance: user.balance,
+        vault: user.vault,
+        tokens: user.tokens,
+        shared: user.shared,
+        cooldown_end: user.cooldownEnd,
+        last_session_taps: user.lastSessionTaps,
+        next_daily_time: user.nextDailyTime,
+        offline_boost: user.offlineBoost,
+        received_log: user.receivedLog
+    };
+}
+
+/* ============================================================
+   CLOUD SAVE (safe & simple)
+   ============================================================ */
+
+async function saveToSupabase(username) {
+    if (!currentUserId || !username || !users[username]) return;
+
+    const U = users[username];
+    const row = userToRow(username, U);
+
+    try {
+        const { error } = await supabaseClient
+            .from("Users")
+            .update(row)
+            .eq("id", currentUserId);
+
+        if (error) {
+            console.warn("Supabase update error:", error.message);
+        }
+    } catch (err) {
+        console.warn("Supabase update failed (offline?):", err);
+    }
+}
+
+async function refreshFromSupabase(username, pin) {
+    try {
+        const { data, error } = await supabaseClient
+            .from("Users")
+            .select("*")
+            .eq("username", username)
+            .eq("pin", pin)
+            .maybeSingle();
+
+        if (error) {
+            console.warn("Supabase select error:", error.message);
+            return null;
+        }
+        return data || null;
+    } catch (err) {
+        console.warn("Supabase select failed:", err);
+        return null;
+    }
+}
+
+/* ============================================================
+   CREATE / LOGIN (cloud-first, local backup)
+   ============================================================ */
+
+async function createUser(){
     const u = usernameInput.value.trim();
     const p = pinInput.value.trim();
-    if(!u||!p) return alert("Enter username + PIN");
-    if(users[u]) return alert("User already exists!");
 
-    users[u] = normalizeUser({pin:p});
-    saveUsers();
+    if(!u || !p) {
+        alert("Enter username + PIN");
+        return;
+    }
+
+    // Check if username already exists in Supabase
+    try {
+        const { data: existing, error: selErr } = await supabaseClient
+            .from("Users")
+            .select("id")
+            .eq("username", u)
+            .maybeSingle();
+
+        if (selErr) {
+            console.warn("Supabase check error:", selErr.message);
+        }
+
+        if (existing) {
+            alert("Username already exists in the cloud!");
+            return;
+        }
+    } catch (err) {
+        console.warn("Supabase check failed:", err);
+    }
+
+    // create local default user
+    const newUser = normalizeUser({ pin: p });
+    users[u] = newUser;
+    saveLocalUsers();
+
+    // insert into Supabase
+    try {
+        const row = userToRow(u, newUser);
+        const { data, error } = await supabaseClient
+            .from("Users")
+            .insert(row)
+            .select()
+            .maybeSingle();
+
+        if (error) {
+            console.warn("Supabase insert error:", error.message);
+            alert("User created locally, but cloud save failed. You can still play.");
+        } else {
+            currentUserId = data.id;
+        }
+    } catch (err) {
+        console.warn("Supabase insert failed:", err);
+        alert("User created locally, but cloud save failed (probably offline).");
+    }
+
     alert("User created!");
 }
 
-function loginUser(){
+async function loginUser(){
     const u = usernameInput.value.trim();
     const p = pinInput.value.trim();
-    if(!users[u]) return alert("User not found!");
-    if(users[u].pin!==p) return alert("Wrong PIN!");
+
+    if(!u || !p) {
+        alert("Enter username + PIN");
+        return;
+    }
+
+    // Try Supabase first
+    let row = await refreshFromSupabase(u, p);
+
+    if (row) {
+        // Cloud user found
+        currentUserId = row.id;
+        users[u] = rowToUser(row);
+        saveLocalUsers();
+        currentUser = u;
+        tapSessionStart = 0;
+        tapCountThisSession = 0;
+        closeModal();
+        updateHUD();
+        return;
+    }
+
+    // fallback to local storage
+    if (!users[u]) {
+        alert("User not found (cloud or local).");
+        return;
+    }
+    const localUser = users[u];
+    if (localUser.pin !== p) {
+        alert("Wrong PIN (using local backup).");
+        return;
+    }
 
     currentUser = u;
+    currentUserId = null; // we don't know the cloud id
     tapSessionStart = 0;
     tapCountThisSession = 0;
     closeModal();
     updateHUD();
 }
 
-/* -------------------------
-   GAME LOGIC — FULL FIX
---------------------------*/
+/* ============================================================
+   GAME LOGIC – TAP & SESSION
+   ============================================================ */
 
 document.getElementById("coin").addEventListener("click", () => {
     if (!currentUser) return openLogin();
@@ -290,7 +470,7 @@ document.getElementById("coin").addEventListener("click", () => {
     const U = users[currentUser];
     const now = Date.now();
 
-    // COOL DOWN CHECK
+    // cooldown check
     if (now < U.cooldownEnd) {
         const remain = U.cooldownEnd - now;
         const m = Math.floor(remain / 60000);
@@ -299,53 +479,44 @@ document.getElementById("coin").addEventListener("click", () => {
         return;
     }
 
-    // START NEW TAP SESSION
+    // start new tap window
     if (!tapSessionStart) {
         tapSessionStart = now;
         tapCountThisSession = 0;
-
-        // Force session to end after 10 seconds
         clearTimeout(tapWindowTimer);
         tapWindowTimer = setTimeout(() => endTapSession(), TAP_WINDOW_MS);
     }
 
-    // GIVE R
+    // 1 tap = 1 R (tapMultiplier is fixed at 1)
     tapCountThisSession++;
     U.balance += 1;
 
-    saveUsers();
+    saveLocalUsers();
     updateHUD();
 });
 
-/* -------------------------
-     FORCED SESSION END
---------------------------*/
-
 function endTapSession() {
     if (!currentUser) return;
-
     const U = users[currentUser];
     const now = Date.now();
 
     if (!tapSessionStart) return;
 
     U.lastSessionTaps = tapCountThisSession;
-
-    // Start cooldown
     U.cooldownEnd = now + COOLDOWN_MS;
 
     tapSessionStart = 0;
     tapCountThisSession = 0;
 
-    saveUsers();
+    saveLocalUsers();
     updateHUD();
+    // save to cloud after each finished session
+    saveToSupabase(currentUser);
 }
 
-/* -------------------------
-      DAILY MATH SYSTEM
---------------------------*/
-
-let dailyCorrectAnswer = null;
+/* ============================================================
+   DAILY MATH SYSTEM
+   ============================================================ */
 
 function maybeTriggerDaily(){
     if(!currentUser) return;
@@ -353,12 +524,14 @@ function maybeTriggerDaily(){
     const U = users[currentUser];
     const now = Date.now();
 
-    if(now < U.nextDailyTime) return;
+    // respect nextDailyTime
+    if (now < U.nextDailyTime) return;
 
     const hour = new Date().getHours();
-    if(hour < 8 || hour > 22) return;
+    if (hour < 8 || hour > 22) return; // only during 8am–10pm
 
-    if(Math.random() < 0.0025){
+    // ~0.25% chance every 30s while playing
+    if (Math.random() < 0.0025){
         startDailyChallenge();
     }
 }
@@ -366,8 +539,8 @@ function maybeTriggerDaily(){
 function startDailyChallenge(){
     const U = users[currentUser];
 
-    let a = Math.floor(Math.random()*30)+1;
-    let b = Math.floor(Math.random()*30)+1;
+    let a = Math.floor(Math.random()*30) + 1;
+    let b = Math.floor(Math.random()*30) + 1;
     dailyCorrectAnswer = a + b;
 
     dailyQuestion.textContent = `${a} + ${b} = ?`;
@@ -375,9 +548,11 @@ function startDailyChallenge(){
     openDailyModal();
 
     const tomorrow = new Date();
-    tomorrow.setHours(24,0,0,0);
+    tomorrow.setHours(24,0,0,0); // midnight
     U.nextDailyTime = tomorrow.getTime();
-    saveUsers();
+
+    saveLocalUsers();
+    saveToSupabase(currentUser);
 }
 
 function submitDaily(){
@@ -385,7 +560,8 @@ function submitDaily(){
     if(ans === dailyCorrectAnswer){
         const U = users[currentUser];
         U.balance += 300;
-        saveUsers();
+        saveLocalUsers();
+        saveToSupabase(currentUser);
         alert("Correct! +300 R");
         closeDailyModal();
         updateHUD();
@@ -394,101 +570,185 @@ function submitDaily(){
     }
 }
 
-/* -------------------------
- VAULT + TOKEN SYSTEM
---------------------------*/
+/* ============================================================
+   VAULT + TOKENS
+   ============================================================ */
+
+function ensureLogged() {
+    if (!currentUser) {
+        openLogin();
+        return false;
+    }
+    return true;
+}
 
 function deposit10(){
-    if(!currentUser) return openLogin();
+    if(!ensureLogged()) return;
     const U = users[currentUser];
-    if(U.balance>=10){ U.balance-=10; U.vault+=10; saveUsers(); updateHUD(); }
+    if(U.balance >= 10){
+        U.balance -= 10;
+        U.vault += 10;
+        saveLocalUsers();
+        saveToSupabase(currentUser);
+        updateHUD();
+    }
 }
 
 function depositAll(){
-    if(!currentUser) return openLogin();
+    if(!ensureLogged()) return;
     const U = users[currentUser];
-    U.vault+=U.balance;
-    U.balance=0;
-    saveUsers(); updateHUD();
+    U.vault += U.balance;
+    U.balance = 0;
+    saveLocalUsers();
+    saveToSupabase(currentUser);
+    updateHUD();
 }
 
 function withdraw10(){
-    if(!currentUser) return openLogin();
+    if(!ensureLogged()) return;
     const U = users[currentUser];
-    if(U.vault>=10){ U.vault-=10; U.tokens+=10; saveUsers(); updateHUD(); }
+    if(U.vault >= 10){
+        U.vault -= 10;
+        U.tokens += 10;
+        saveLocalUsers();
+        saveToSupabase(currentUser);
+        updateHUD();
+    }
 }
 
 function withdrawAll(){
-    if(!currentUser) return openLogin();
+    if(!ensureLogged()) return;
     const U = users[currentUser];
-    U.tokens+=U.vault;
-    U.vault=0;
-    saveUsers(); updateHUD();
+    U.tokens += U.vault;
+    U.vault = 0;
+    saveLocalUsers();
+    saveToSupabase(currentUser);
+    updateHUD();
 }
 
-/* -------------------------
-     SHARED WALLET SYSTEM
---------------------------*/
+/* ============================================================
+   SHARED WALLET + SEND
+   ============================================================ */
 
 function depositShared10(){
-    if(!currentUser) return openLogin();
+    if(!ensureLogged()) return;
     const U = users[currentUser];
-    if(U.vault>=10){ U.vault-=10; U.shared+=10; saveUsers(); updateHUD(); }
+    if(U.vault >= 10){
+        U.vault -= 10;
+        U.shared += 10;
+        saveLocalUsers();
+        saveToSupabase(currentUser);
+        updateHUD();
+    }
 }
 
 function withdrawShared10(){
-    if(!currentUser) return openLogin();
+    if(!ensureLogged()) return;
     const U = users[currentUser];
-    if(U.shared>=10){ U.shared-=10; U.vault+=10; saveUsers(); updateHUD(); }
+    if(U.shared >= 10){
+        U.shared -= 10;
+        U.vault += 10;
+        saveLocalUsers();
+        saveToSupabase(currentUser);
+        updateHUD();
+    }
 }
 
-function sendFromShared(){
-    if(!currentUser) return openLogin();
+async function sendFromShared(){
+    if(!ensureLogged()) return;
 
-    const sender = users[currentUser];
+    const senderName = currentUser;
+    const sender = users[senderName];
     const receiverName = sendUserInput.value.trim();
     const amount = Number(sendAmountInput.value.trim());
 
-    if(!receiverName || !users[receiverName]) return alert("User not found");
-    if(receiverName===currentUser) return alert("Cannot send to yourself");
-    if(amount<=0) return alert("Invalid amount");
-    if(sender.shared < amount) return alert("Insufficient shared funds");
+    if(!receiverName) return alert("Enter a username.");
+    if(receiverName === senderName) return alert("Cannot send to yourself.");
+    if(amount <= 0) return alert("Invalid amount.");
+    if(sender.shared < amount) return alert("Insufficient shared funds.");
+
+    // Try to load receiver from Supabase
+    let receiverRow = null;
+    try {
+        const { data, error } = await supabaseClient
+            .from("Users")
+            .select("*")
+            .eq("username", receiverName)
+            .maybeSingle();
+        if (error) console.warn("Supabase receiver lookup error:", error.message);
+        receiverRow = data || null;
+    } catch (err) {
+        console.warn("Supabase receiver lookup failed:", err);
+    }
+
+    if (receiverRow) {
+        // cloud receiver
+        const receiverLocal = rowToUser(receiverRow);
+
+        sender.shared -= amount;
+        receiverLocal.balance += amount;
+        receiverLocal.receivedLog.push(
+            `Received ${amount} R from ${senderName}`
+        );
+        users[receiverName] = receiverLocal; // keep a local copy too
+
+        saveLocalUsers();
+        // update both in cloud
+        await saveToSupabase(senderName);
+        currentUserId = receiverRow.id;
+        await saveToSupabase(receiverName);
+        // restore sender id
+        const senderRow = await refreshFromSupabase(senderName, sender.pin);
+        if (senderRow) currentUserId = senderRow.id;
+
+        updateHUD();
+        alert(`Sent ${amount} R to ${receiverName} (cloud).`);
+        return;
+    }
+
+    // Fallback: local-only receiver
+    if (!users[receiverName]) {
+        alert("Receiver not found (cloud or local).");
+        return;
+    }
 
     sender.shared -= amount;
     users[receiverName].balance += amount;
     users[receiverName].receivedLog.push(
-        `Received ${amount} R from ${currentUser}`
+        `Received ${amount} R from ${senderName}`
     );
 
-    saveUsers();
+    saveLocalUsers();
+    saveToSupabase(senderName);
     updateHUD();
+    alert(`Sent ${amount} R to ${receiverName} (local backup).`);
 }
 
-/* -------------------------
-   EXPORT / IMPORT SAVE
---------------------------*/
+/* ============================================================
+   EXPORT / IMPORT LOCAL BACKUP
+   ============================================================ */
 
 function exportSave(){
     const raw = localStorage.getItem("rtycoon_users");
-    if(!raw) return alert("No save found.");
+    if(!raw) return alert("No local backup found.");
 
     let formatted = raw;
     try{ formatted = JSON.stringify(JSON.parse(raw),null,2); }catch(e){}
 
     if(navigator.clipboard){
         navigator.clipboard.writeText(formatted).then(()=>{
-            alert("Copied to clipboard:\n\n"+formatted);
+            alert("Local backup copied to clipboard.");
         },()=>{
-            alert("Save:\n\n"+formatted);
+            alert("Local backup:\n\n"+formatted);
         });
     } else {
-        alert("Save:\n\n"+formatted);
+        alert("Local backup:\n\n"+formatted);
     }
 }
 
 function importSave(){
     const text = importText.value.trim();
-    if(!text) return alert("Paste your save JSON first.");
+    if(!text) return alert("Paste your JSON first.");
 
     let obj;
     try{ obj = JSON.parse(text); }catch(e){ return alert("Invalid JSON"); }
@@ -499,17 +759,18 @@ function importSave(){
     }
 
     users = newUsers;
-    saveUsers();
+    saveLocalUsers();
     currentUser = null;
+    currentUserId = null;
 
     closeImportModal();
-    alert("Save imported! Log in again.");
+    alert("Local backup imported. Log in again.");
     openLogin();
 }
 
-/* -------------------------
-      HUD UPDATE
---------------------------*/
+/* ============================================================
+   HUD
+   ============================================================ */
 
 function updateHUD(){
     if(!currentUser) return;
@@ -535,16 +796,18 @@ function updateHUD(){
     userText.textContent = `User: ${currentUser} (tap to switch user)`;
 }
 
-/* -------------------------
-      ON LOAD
---------------------------*/
+/* ============================================================
+   ON LOAD
+   ============================================================ */
 
 window.onload = ()=>{
     if(!Object.keys(users).length){
+        // default guest with pin 0000, still normalized
         users["Guest"] = normalizeUser({pin:"0000"});
-        saveUsers();
+        saveLocalUsers();
     }
 
+    // show login every time
     openLogin();
 
     // Daily check every 30 sec
